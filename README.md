@@ -1,11 +1,41 @@
 # qwen3.6-35b-a3b-rft
 
-Rejection sampling fine-tuning (RFT) of **Qwen3.6-35B-A3B** for math, physics, tool calling and agentic Python —
+Rejection sampling fine-tuning (RFT) of **Qwen3.6-35B-A3B** for math, physics, tool calling and agentic Python,
 on a Google Colab compute-unit budget, ending in a GGUF that runs locally in LM Studio.
 
 The model generates several solutions to problems with **verifiable answers**, graders keep the correct ones, and the
 **shortest correct solution** per problem becomes training data. A bf16 LoRA is trained on that data, evaluated against
 the base model under identical conditions, and exported as an imatrix-calibrated mixed Q4 GGUF.
+
+## Models
+
+Both models are public on Hugging Face as mixed Q4 GGUFs (~21 GiB) with their imatrix files.
+
+| Model | Training data |
+|---|---|
+| [Qwen3.6-35B-A3B-RFT-Agent-GGUF](https://huggingface.co/salihyesil59/Qwen3.6-35B-A3B-RFT-Agent-GGUF) | Round-1 RFT data plus multi-turn agent episodes (Python tool, sandboxed coding). **Recommended.** |
+| [Qwen3.6-35B-A3B-rft1-GGUF](https://huggingface.co/salihyesil59/Qwen3.6-35B-A3B-rft1-GGUF) | Round-1 RFT data only: math, physics, Python and tool calls |
+
+Results (FP8 on vLLM, 4 samples per problem, 16k tokens, truncated answers count as wrong):
+
+| Set | Base | rft1 | RFT-Agent |
+|---|---|---|---|
+| personal (4 problems) | 87.5% | 100% | 100% |
+| MATH-500 (100-problem subset) | 70.0% | 73.0% | 73.5% |
+| AIME 2025 | 12.5% | 12.5% | 13.3% |
+| GPQA Diamond (physics, 86) | 55.2% | 63.4% | 62.5% |
+
+With a Python tool (2 samples, 8k tokens per turn):
+
+| Set | Base | RFT-Agent |
+|---|---|---|
+| MATH-500 + Python | 61.0% | 71.0% |
+| AIME 2025 + Python | 3.3% | 6.7% |
+| GPQA physics + Python | 79.1% | 79.1% |
+| Agentic coding (100 held-out KodCode tasks) | 91.5% | 91.5% |
+
+Most of the gain comes from shorter reasoning, i.e. fewer answers cut off at the token limit. Recommended settings:
+thinking mode, temperature 0.6, top_p 0.95, top_k 20; offload the MoE experts to the CPU in LM Studio / llama.cpp.
 
 ## Pipeline
 
@@ -22,7 +52,7 @@ the base model under identical conditions, and exported as an imatrix-calibrated
 
 | Notebook | What it does | Runtime | Cost |
 |---|---|---|---|
-| [01_pilot_sft](notebooks/01_pilot_sft.ipynb) | Pipeline smoke test on Qwen3.5-4B with Mixture-of-Thoughts data. Not about scores — only that every step runs. | L4 | 5–10 CU |
+| [01_pilot_sft](notebooks/01_pilot_sft.ipynb) | Pipeline smoke test on Qwen3.5-4B with Mixture-of-Thoughts data. Not about scores, only that every step runs. | L4 | 5–10 CU |
 | [02_rft_generate](notebooks/02_rft_generate.ipynb) | **A)** baseline eval of the FP8 model with vLLM. **B)** samples 4 solutions per problem from a verifiable pool and grades them. Resumable. | A100 80GB | ~34 CU (5 h cap) |
 | [03_agent_rft](notebooks/03_agent_rft.ipynb) | Multi-turn episodes where tool calls are **actually executed**: math/physics with `run_python`, and KodCode tasks solved with `read_file` / `write_file` / `run_tests`. Includes a held-out set of 100 agentic coding tasks. | A100 80GB | ~30–35 CU |
 | [04_sft](notebooks/04_sft.ipynb) | Selects training data from 02 + 03, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
@@ -41,7 +71,7 @@ Every source has an automatic grader; problems that appear in an eval set are re
 | agent | math/physics with a Python tool; KodCode in a sandbox | `\boxed{}` / tests pass after restoring the test file |
 
 **Selection rules**
-- Only correct and *complete* solutions (no truncation) are used, shortest first — this also shortens the reasoning.
+- Only correct and *complete* solutions (no truncation) are used, shortest first; this also shortens the reasoning.
 - Partially solved problems (1/4–3/4) carry the real learning signal: up to 2 solutions each.
 - Problems solved 4/4 are kept at a reduced rate, one solution each; never-solved problems are saved for a later round.
 - Examples are rendered with the model's **own chat template** (`reasoning_content` → `<think>`, `tool_calls` → XML) and
@@ -100,7 +130,7 @@ python eval/run_eval.py --tasks eval/tasks/personal.jsonl eval/tasks/math500.jso
 
 Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 
-> **Warning:** the agent tools are not a real sandbox — model-written code runs on the host machine.
+> **Warning:** the agent tools are not a real sandbox: model-written code runs on the host machine.
 
 ## Running it on Colab
 
@@ -109,7 +139,7 @@ Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 3. Accept the terms of the gated datasets on Hugging Face: [GPQA](https://huggingface.co/datasets/Idavidrein/gpqa) and
    [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k).
 4. Run the notebooks in order. Every long step writes to Drive and resumes when the session drops.
-5. In 04 and 05, use *Runtime → Restart session* between the Unsloth and vLLM/llama.cpp parts — **not**
+5. In 04 and 05, use *Runtime → Restart session* between the Unsloth and vLLM/llama.cpp parts, **not**
    "Disconnect and delete runtime", which deletes the merged model on local disk.
 
 ## Notes
