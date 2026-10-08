@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Claude Code
+.claude/
+
+# Eval outputs and downloaded benchmarks (GPQA must not be published)
+eval/results/
+eval/tasks/*
+!eval/tasks/personal.jsonl
