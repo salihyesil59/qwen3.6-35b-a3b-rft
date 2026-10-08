@@ -14,11 +14,11 @@ Both models are public on Hugging Face as mixed Q4 GGUFs (~21 GiB) with their im
 | Model | Training data |
 |---|---|
 | [Qwen3.6-35B-A3B-RFT-Agent-GGUF](https://huggingface.co/salihyesil59/Qwen3.6-35B-A3B-RFT-Agent-GGUF) | Round-1 RFT data plus multi-turn agent episodes (Python tool, sandboxed coding). **Recommended.** |
-| [Qwen3.6-35B-A3B-rft1-GGUF](https://huggingface.co/salihyesil59/Qwen3.6-35B-A3B-rft1-GGUF) | Round-1 RFT data only: math, physics, Python and tool calls |
+| [Qwen3.6-35B-A3B-RFT-Reasoning-GGUF](https://huggingface.co/salihyesil59/Qwen3.6-35B-A3B-RFT-Reasoning-GGUF) | Round-1 RFT data only: math, physics, Python and tool calls |
 
 Results (FP8 on vLLM, 4 samples per problem, 16k tokens, truncated answers count as wrong):
 
-| Set | Base | rft1 | RFT-Agent |
+| Set | Base | RFT-Reasoning | RFT-Agent |
 |---|---|---|---|
 | personal (4 problems) | 87.5% | 100% | 100% |
 | MATH-500 (100-problem subset) | 70.0% | 73.0% | 73.5% |
