@@ -190,6 +190,9 @@ class Proxy:
         self.model = model
         self.sampling = sampling or {"temperature": 0.6, "top_p": 0.95, "top_k": 20}
         self.runs, self.reasoning, self.lock = {}, {}, threading.Lock()
+        # replies whose client had already hung up (claude exited or was killed while the reply was generated):
+        # "side" = requests without tools (titles, summaries), "loop" = the agent loop itself
+        self.dropped = collections.Counter()
         self.http = requests.Session()
         self.http.mount("http://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=128))
         if api_key:
@@ -210,7 +213,15 @@ class Proxy:
                 if m.group(3):
                     return self.send_json(200, {"input_tokens": len(json.dumps(body)) // 4})
                 status, payload = proxy.complete(m.group(1), body)
-                if status != 200 or not body.get("stream"):
+                try:
+                    self.send_reply(status, payload, body.get("stream"))
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
+                    with proxy.lock:
+                        proxy.dropped["loop" if body.get("tools") else "side"] += 1
+
+            def send_reply(self, status, payload, stream):
+                if status != 200 or not stream:
                     return self.send_json(status, payload)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -801,7 +812,8 @@ def run_tasks(tasks, samples, proxy, results_path, claude_bin, work_root="/conte
                 solved += record["ok"]
                 if finished % 10 == 0 or finished == len(todo):
                     h = (time.time() - start) / 3600
-                    print(f"{label} {finished}/{len(todo)} | solved {solved / finished:.0%} | {h:.2f} h")
+                    dropped = "".join(f" | dropped {k} {v}" for k, v in sorted(proxy.dropped.items()))
+                    print(f"{label} {finished}/{len(todo)} | solved {solved / finished:.0%} | {h:.2f} h{dropped}")
     if hours and time.time() - start > hours * 3600:
         print("Time budget reached: runs not started yet are left for the next call.")
 
