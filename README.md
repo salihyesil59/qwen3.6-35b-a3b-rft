@@ -40,15 +40,15 @@ thinking mode, temperature 0.6, top_p 0.95, top_k 20; offload the MoE experts to
 ## Pipeline
 
 Notebooks are numbered in the order they run. Version 0.2.0 (in progress) retargets the model at coding with Claude
-Code while keeping math and physics; `03` and `04` are not written yet. The first pipeline, including the Qwen3.5-4B
+Code while keeping math and physics. The first pipeline, including the Qwen3.5-4B
 pilot and the round-2 episodes in the local-ai coding agent, is archived in
 [v0.1.0](https://github.com/salihyesil59/qwen3.6-35b-a3b-rft/releases/tag/v0.1.0).
 
 ```
 01 RFT generation      ─ baseline eval + single-turn solutions (math, physics, code, tool calls)   ─┐
 02 Agent RFT           ─ tools baseline eval + multi-turn episodes (Python tool, sandboxed coding)  ─┤
-03 Claude Code eval    ─ Q4 GGUFs on llama.cpp, coding tasks inside Claude Code (planned)           │
-04 Claude Code RFT     ─ coding episodes inside Claude Code, graded by tests (planned)             ─┤
+03 Claude Code eval    ─ Q4 GGUFs on llama.cpp, coding tasks inside Claude Code (baseline)          │
+04 Claude Code RFT     ─ coding episodes inside Claude Code, graded by tests                       ─┤
         │                                                                                             │
 05 SFT + eval          ─ bf16 LoRA on the shortest correct solutions; base vs RFT comparison  ◄──────┘
         │
@@ -61,9 +61,9 @@ pilot and the round-2 episodes in the local-ai coding agent, is archived in
 |---|---|---|---|
 | [01_rft_generate](notebooks/01_rft_generate.ipynb) | **A)** baseline eval of the FP8 model with vLLM. **B)** samples 4 solutions per problem from a verifiable pool and grades them. Resumable. | A100 80GB | ~34 CU (5 h cap) |
 | [02_agent_rft](notebooks/02_agent_rft.ipynb) | Multi-turn episodes where tool calls are **actually executed**: math/physics with `run_python`, and KodCode tasks solved with `read_file` / `write_file` / `run_tests`. Includes a held-out set of 100 agentic coding tasks. | A100 80GB | ~30–35 CU |
-| 03_claude_code_eval | Planned. | | |
-| 04_claude_code_rft | Planned. | | |
-| [05_sft](notebooks/05_sft.ipynb) | Selects training data from 01 + 02, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
+| [03_claude_code_eval](notebooks/03_claude_code_eval.ipynb) | Q4 GGUFs on llama-server solve coding tasks **inside Claude Code** (`claude -p`, six tools) through a proxy for the Anthropic API: 100 hard KodCode tasks and the Python + JavaScript exercises of the Aider polyglot benchmark, graded by their tests. Resumable. | A100 80GB | ~15–20 CU (2 models) |
+| [04_claude_code_rft](notebooks/04_claude_code_rft.ipynb) | RFT-Agent solves 400 KodCode tasks inside Claude Code; the proxy keeps every conversation, and the shortest clean runs that pass the restored tests become training data. Resumable. | A100 80GB | ~25 CU |
+| [05_sft](notebooks/05_sft.ipynb) | Selects training data from 01 + 02 + 04, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
 | [06_gguf](notebooks/06_gguf.ipynb) | Merges the LoRA, converts to GGUF, computes an imatrix on domain text and produces a mixed Q4 (~22–23 GB), uploaded to Hugging Face. | A100 80GB | ~10 CU |
 
 ## Training data
@@ -78,13 +78,15 @@ Every source has an automatic grader; problems that appear in an eval set are re
 | tool | [`Salesforce/xlam-function-calling-60k`](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k) (gated) | all calls + arguments, exact |
 | agent | math/physics with a Python tool; KodCode in a sandbox | `\boxed{}` / tests pass after restoring the test file |
 | harness (v0.1.0) | KodCode solved in the local-ai coding agent (its own tools, plan → verify → review) | tests pass after restoring the test file |
+| claude_code | KodCode solved inside Claude Code (`Bash, Read, Edit, Write, Glob, Grep`) | tests pass after restoring the test file |
 
 **Selection rules**
 - Only correct and *complete* solutions (no truncation) are used, shortest first; this also shortens the reasoning.
 - Partially solved problems (1/4–3/4) carry the real learning signal: up to 2 solutions each.
 - Problems solved 4/4 are kept at a reduced rate, one solution each; never-solved problems are saved for a later round.
 - Examples are rendered with the model's **own chat template** (`reasoning_content` → `<think>`, `tool_calls` → XML) and
-  skipped, not truncated, when they exceed the training length (10240 tokens).
+  skipped, not truncated, when they exceed the training length (16384 tokens; a Claude Code episode carries a
+  ~6k-token system prompt and tool definitions).
 
 ## Evaluation
 
@@ -99,6 +101,7 @@ temperature 0.6, 16k max tokens. Both result files are re-scored with the curren
 | `aime2025` | AIME 2025 |
 | `gpqa_physics` | GPQA Diamond, physics subset |
 | `*+py`, `agent_code` | the same sets with a Python tool, plus 100 held-out agentic coding tasks |
+| `cc_kodcode_hard`, `polyglot_*` | inside Claude Code (`03`): 100 hard held-out KodCode tasks and the Python (34) and JavaScript (49) exercises of the [Aider polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark), with the Q4 GGUFs on llama.cpp |
 
 ## Quantization
 
@@ -124,6 +127,7 @@ graders, so local and Colab results use the same format.
 | [agent.py](eval/agent.py) | Multi-turn tool-use episodes (Python tool, sandboxed coding) |
 | [fetch_benchmarks.py](eval/fetch_benchmarks.py) | Downloads MATH-500, AIME 2025 and GPQA physics into `eval/tasks/` |
 | [rescore.py](eval/rescore.py) | Re-grades a saved results file without running the model |
+| [claude_code.py](eval/claude_code.py) | Claude Code runs on a local model: the Anthropic API proxy, task folders, grading (used by `03` and `04`) |
 
 ```bash
 pip install requests datasets pytest
@@ -140,6 +144,22 @@ python eval/run_eval.py --tasks eval/tasks/personal.jsonl eval/tasks/math500.jso
 Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 
 > **Warning:** the agent tools are not a real sandbox: model-written code runs on the host machine.
+
+## Using it in Claude Code
+
+The model is trained on Claude Code with six tools (`Bash, Read, Edit, Write, Glob, Grep`) and on the requests as
+`eval/claude_code.py` converts them, so use both at home. The proxy sits between Claude Code and the OpenAI API of
+LM Studio (or llama-server):
+
+```bash
+python eval/claude_code.py --upstream http://localhost:1234/v1 --model <model id in LM Studio>
+```
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8100/r/home ANTHROPIC_API_KEY=local claude --tools Bash,Read,Edit,Write,Glob,Grep
+```
+
+Give the model at least 32k tokens of context in LM Studio: Claude Code's prompt alone is ~6k.
 
 ## Running it on Colab
 
