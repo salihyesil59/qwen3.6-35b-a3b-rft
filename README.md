@@ -52,7 +52,7 @@ pilot and the round-2 episodes in the local-ai coding agent, is archived in
         │                                                                                             │
 05 SFT + eval          ─ bf16 LoRA on the shortest correct solutions; base vs RFT comparison  ◄──────┘
         │
-06 GGUF                ─ merge → bf16 GGUF → imatrix → mixed Q4 → Hugging Face → LM Studio
+06 GGUF                ─ merge → bf16 GGUF → imatrix → mixed Q4 + Q3 → Hugging Face → local
         │
 03 Claude Code eval    ─ again, on the new model
 ```
@@ -61,10 +61,10 @@ pilot and the round-2 episodes in the local-ai coding agent, is archived in
 |---|---|---|---|
 | [01_rft_generate](notebooks/01_rft_generate.ipynb) | **A)** baseline eval of the FP8 model with vLLM. **B)** samples 4 solutions per problem from a verifiable pool and grades them. Resumable. | A100 80GB | ~34 CU (5 h cap) |
 | [02_agent_rft](notebooks/02_agent_rft.ipynb) | Multi-turn episodes where tool calls are **actually executed**: math/physics with `run_python`, and KodCode tasks solved with `read_file` / `write_file` / `run_tests`. Includes a held-out set of 100 agentic coding tasks. | A100 80GB | ~30–35 CU |
-| [03_claude_code_eval](notebooks/03_claude_code_eval.ipynb) | Q4 GGUFs on llama-server solve coding tasks **inside Claude Code** (`claude -p`, six tools) through a proxy for the Anthropic API: 100 hard KodCode tasks and the Python + JavaScript exercises of the Aider polyglot benchmark, graded by their tests. Resumable. | A100 80GB | ~15–20 CU (2 models) |
-| [04_claude_code_rft](notebooks/04_claude_code_rft.ipynb) | RFT-Agent solves 400 KodCode tasks inside Claude Code; the proxy keeps every conversation, and the shortest clean runs that pass the restored tests become training data. Resumable. | A100 80GB | ~25 CU |
+| [03_claude_code_eval](notebooks/03_claude_code_eval.ipynb) | Q4 GGUFs on llama-server solve coding tasks **inside Claude Code** (`claude -p`, the tools used at home) through a proxy for the Anthropic API: 100 hard KodCode tasks, the Python + JavaScript exercises of the Aider polyglot benchmark and 60 tasks in 4 held-out Python libraries, graded by their tests. Resumable. | A100 80GB | ~25–35 CU (3 models) |
+| [04_claude_code_rft](notebooks/04_claude_code_rft.ipynb) | RFT-Agent solves 250 KodCode tasks and ~150 repository tasks (bugs and missing functions in 7 small Python libraries) inside Claude Code; the proxy keeps every conversation, and the shortest clean runs that pass the restored tests become training data. Resumable. | A100 80GB | ~30–35 CU |
 | [05_sft](notebooks/05_sft.ipynb) | Selects training data from 01 + 02 + 04, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
-| [06_gguf](notebooks/06_gguf.ipynb) | Merges the LoRA, converts to GGUF, computes an imatrix on domain text and produces a mixed Q4 (~22–23 GB), uploaded to Hugging Face. | A100 80GB | ~10 CU |
+| [06_gguf](notebooks/06_gguf.ipynb) | Merges the LoRA, converts to GGUF, computes an imatrix on domain text and produces a mixed Q4 (~22–23 GB) and a mixed Q3, uploaded to Hugging Face. With `RUN_NAME = None` it does the same for the base model (the fair baseline for `03`). | A100 80GB | ~10–12 CU |
 
 ## Training data
 
@@ -78,7 +78,7 @@ Every source has an automatic grader; problems that appear in an eval set are re
 | tool | [`Salesforce/xlam-function-calling-60k`](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k) (gated) | all calls + arguments, exact |
 | agent | math/physics with a Python tool; KodCode in a sandbox | `\boxed{}` / tests pass after restoring the test file |
 | harness (v0.1.0) | KodCode solved in the local-ai coding agent (its own tools, plan → verify → review) | tests pass after restoring the test file |
-| claude_code | KodCode solved inside Claude Code (`Bash, Read, Edit, Write, Glob, Grep`) | tests pass after restoring the test file |
+| claude_code | KodCode, and bugs / missing functions in 7 small Python libraries (toolz, cachetools, boltons, more-itertools, click, mistune, jmespath), solved inside Claude Code (`Bash, Read, Edit, Write, Glob, Grep`, web search / fetch) | tests pass after restoring the test files |
 
 **Selection rules**
 - Only correct and *complete* solutions (no truncation) are used, shortest first; this also shortens the reasoning.
@@ -86,7 +86,7 @@ Every source has an automatic grader; problems that appear in an eval set are re
 - Problems solved 4/4 are kept at a reduced rate, one solution each; never-solved problems are saved for a later round.
 - Examples are rendered with the model's **own chat template** (`reasoning_content` → `<think>`, `tool_calls` → XML) and
   skipped, not truncated, when they exceed the training length (16384 tokens; a Claude Code episode carries a
-  ~6k-token system prompt and tool definitions).
+  ~7k-token system prompt and tool definitions).
 
 ## Evaluation
 
@@ -101,7 +101,7 @@ temperature 0.6, 16k max tokens. Both result files are re-scored with the curren
 | `aime2025` | AIME 2025 |
 | `gpqa_physics` | GPQA Diamond, physics subset |
 | `*+py`, `agent_code` | the same sets with a Python tool, plus 100 held-out agentic coding tasks |
-| `cc_kodcode_hard`, `polyglot_*` | inside Claude Code (`03`): 100 hard held-out KodCode tasks and the Python (34) and JavaScript (49) exercises of the [Aider polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark), with the Q4 GGUFs on llama.cpp |
+| `cc_kodcode_hard`, `polyglot_*`, `cc_repo` | inside Claude Code (`03`): 100 hard held-out KodCode tasks, the Python (34) and JavaScript (49) exercises of the [Aider polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark), and 60 bug / missing-function tasks in 4 Python libraries never used for training (tabulate, parse, tomli, marshmallow), with the Q4 GGUFs on llama.cpp |
 
 ## Quantization
 
@@ -109,7 +109,7 @@ The 35B-A3B MoE is meant to run locally with the experts offloaded to the CPU, s
 
 | Tensors | Type | Why |
 |---|---|---|
-| Experts (`ffn_*_exps`) | Q4_K_M | ~90% of the size; kept on the CPU |
+| Experts (`ffn_*_exps`) | Q4_K_M (Q3_K_M in the Q3 file, from 0.2.0 on) | ~90% of the size; kept on the CPU |
 | Attention, linear attention, shared expert | Q8_0 | small but sensitive; on the GPU |
 | Output layer / embedding | Q8_0 / Q6_K | |
 
@@ -127,7 +127,8 @@ graders, so local and Colab results use the same format.
 | [agent.py](eval/agent.py) | Multi-turn tool-use episodes (Python tool, sandboxed coding) |
 | [fetch_benchmarks.py](eval/fetch_benchmarks.py) | Downloads MATH-500, AIME 2025 and GPQA physics into `eval/tasks/` |
 | [rescore.py](eval/rescore.py) | Re-grades a saved results file without running the model |
-| [claude_code.py](eval/claude_code.py) | Claude Code runs on a local model: the Anthropic API proxy, task folders, grading (used by `03` and `04`) |
+| [claude_code.py](eval/claude_code.py) | Claude Code on a local model: the Anthropic API proxy, repository tasks, task folders, grading (used by `03` and `04`), and the launcher for home use |
+| [web_mcp.py](eval/web_mcp.py) | Web search and page fetch as a small MCP server: the web tools of the model in Claude Code |
 
 ```bash
 pip install requests datasets pytest
@@ -147,19 +148,42 @@ Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 
 ## Using it in Claude Code
 
-The model is trained on Claude Code with six tools (`Bash, Read, Edit, Write, Glob, Grep`) and on the requests as
-`eval/claude_code.py` converts them, so use both at home. The proxy sits between Claude Code and the OpenAI API of
-LM Studio (or llama-server):
+The model is trained on Claude Code as `eval/claude_code.py` sets it up: the tools `Bash, Read, Edit, Write, Glob,
+Grep`, the web tools of `eval/web_mcp.py`, fixed flags and settings, and the requests converted by its proxy. At home,
+start Claude Code through the same file, so the model sees exactly that setup. It starts the proxy in front of the
+model server (Unsloth Studio by default) and then Claude Code; arguments it does not know go to Claude Code.
 
-```bash
-python eval/claude_code.py --upstream http://localhost:1234/v1 --model <model id in LM Studio>
-```
+1. Install the pinned Claude Code (`CLAUDE_CODE_VERSION` in `claude_code.py`) and the web tools' packages:
 
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8100/r/home ANTHROPIC_API_KEY=local claude --tools Bash,Read,Edit,Write,Glob,Grep
-```
+   ```powershell
+   npm install -g @anthropic-ai/claude-code@2.1.331
+   ```
 
-Give the model at least 32k tokens of context in LM Studio: Claude Code's prompt alone is ~6k.
+   ```powershell
+   pip install requests "ddgs==9.16.1"
+   ```
+
+2. In Unsloth Studio, load the GGUF and create an API key (*Settings → API*). Keep it in an environment variable:
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable("UNSLOTH_API_KEY", "<key>", "User")
+   ```
+
+3. Add a `claude-local` command to your PowerShell profile (`notepad $PROFILE`), with the path of this repository:
+
+   ```powershell
+   function claude-local { python "C:\path\to\qwen3.6-35b-a3b-rft\eval\claude_code.py" @args }
+   ```
+
+4. In a project folder: `claude-local` (or `claude-local --continue`, `claude-local --resume <id>`).
+
+Notes:
+- Settings, sessions and memory of the local model live in `~/.claude-local`, apart from your own `~/.claude`, so
+  that plugins, skills and hooks of your own setup do not end up in the prompt.
+- LM Studio or llama-server instead of Unsloth: `claude-local --upstream http://127.0.0.1:1234/v1`.
+- Give the model at least 32k tokens of context: Claude Code's prompt and tools alone are ~7k.
+- The training runs use `claude -p`, whose system prompt starts with a different first line than the interactive one;
+  the rest of the setup is the same.
 
 ## Running it on Colab
 
