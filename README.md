@@ -39,25 +39,32 @@ thinking mode, temperature 0.6, top_p 0.95, top_k 20; offload the MoE experts to
 
 ## Pipeline
 
+Notebooks are numbered in the order they run. Version 0.2.0 (in progress) retargets the model at coding with Claude
+Code while keeping math and physics; `03` and `04` are not written yet. The first pipeline, including the Qwen3.5-4B
+pilot and the round-2 episodes in the local-ai coding agent, is archived in
+[v0.1.0](https://github.com/salihyesil59/qwen3.6-35b-a3b-rft/releases/tag/v0.1.0).
+
 ```
-01 pilot (Qwen3.5-4B)  ─ validates data → LoRA → GGUF → LM Studio → eval end to end
-        │
-02 RFT generation      ─ baseline eval + single-turn solutions (math, physics, code, tool calls)   ─┐
-03 Agent RFT           ─ tools baseline eval + multi-turn episodes (Python tool, sandboxed coding)  ─┤
+01 RFT generation      ─ baseline eval + single-turn solutions (math, physics, code, tool calls)   ─┐
+02 Agent RFT           ─ tools baseline eval + multi-turn episodes (Python tool, sandboxed coding)  ─┤
+03 Claude Code eval    ─ Q4 GGUFs on llama.cpp, coding tasks inside Claude Code (planned)           │
+04 Claude Code RFT     ─ coding episodes inside Claude Code, graded by tests (planned)             ─┤
         │                                                                                             │
-04 SFT + eval          ─ bf16 LoRA on the shortest correct solutions; base vs RFT comparison  ◄──────┘
+05 SFT + eval          ─ bf16 LoRA on the shortest correct solutions; base vs RFT comparison  ◄──────┘
         │
-05 GGUF                ─ merge → bf16 GGUF → imatrix → mixed Q4 → Hugging Face → LM Studio
+06 GGUF                ─ merge → bf16 GGUF → imatrix → mixed Q4 → Hugging Face → LM Studio
+        │
+03 Claude Code eval    ─ again, on the new model
 ```
 
 | Notebook | What it does | Runtime | Cost |
 |---|---|---|---|
-| [01_pilot_sft](notebooks/01_pilot_sft.ipynb) | Pipeline smoke test on Qwen3.5-4B with Mixture-of-Thoughts data. Not about scores, only that every step runs. | L4 | 5–10 CU |
-| [02_rft_generate](notebooks/02_rft_generate.ipynb) | **A)** baseline eval of the FP8 model with vLLM. **B)** samples 4 solutions per problem from a verifiable pool and grades them. Resumable. | A100 80GB | ~34 CU (5 h cap) |
-| [03_agent_rft](notebooks/03_agent_rft.ipynb) | Multi-turn episodes where tool calls are **actually executed**: math/physics with `run_python`, and KodCode tasks solved with `read_file` / `write_file` / `run_tests`. Includes a held-out set of 100 agentic coding tasks. | A100 80GB | ~30–35 CU |
-| [06_harness_rft](notebooks/06_harness_rft.ipynb) | Round 2: the RFT-Agent Q4 GGUF (llama.cpp server, the same file as at home) solves KodCode tasks inside the coding agent of [local-ai](https://github.com/salihyesil59/local-ai) (`local-ai traces collect`), graded by the restored tests; clean episodes that fit become `harness_sft.jsonl` for `04`. Resumable. | A100 80GB | ~25 CU |
-| [04_sft](notebooks/04_sft.ipynb) | Selects training data from 02 + 03, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
-| [05_gguf](notebooks/05_gguf.ipynb) | Merges the LoRA, converts to GGUF, computes an imatrix on domain text and produces a mixed Q4 (~22–23 GB), uploaded to Hugging Face. | A100 80GB | ~10 CU |
+| [01_rft_generate](notebooks/01_rft_generate.ipynb) | **A)** baseline eval of the FP8 model with vLLM. **B)** samples 4 solutions per problem from a verifiable pool and grades them. Resumable. | A100 80GB | ~34 CU (5 h cap) |
+| [02_agent_rft](notebooks/02_agent_rft.ipynb) | Multi-turn episodes where tool calls are **actually executed**: math/physics with `run_python`, and KodCode tasks solved with `read_file` / `write_file` / `run_tests`. Includes a held-out set of 100 agentic coding tasks. | A100 80GB | ~30–35 CU |
+| 03_claude_code_eval | Planned. | | |
+| 04_claude_code_rft | Planned. | | |
+| [05_sft](notebooks/05_sft.ipynb) | Selects training data from 01 + 02, trains a bf16 LoRA with Unsloth, merges it, then re-runs both evals with vLLM and compares against the base model. | A100 80GB | ~20–30 CU |
+| [06_gguf](notebooks/06_gguf.ipynb) | Merges the LoRA, converts to GGUF, computes an imatrix on domain text and produces a mixed Q4 (~22–23 GB), uploaded to Hugging Face. | A100 80GB | ~10 CU |
 
 ## Training data
 
@@ -70,7 +77,7 @@ Every source has an automatic grader; problems that appear in an eval set are re
 | code | [`KodCode/KodCode-V1`](https://huggingface.co/datasets/KodCode/KodCode-V1), medium/hard | pytest |
 | tool | [`Salesforce/xlam-function-calling-60k`](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k) (gated) | all calls + arguments, exact |
 | agent | math/physics with a Python tool; KodCode in a sandbox | `\boxed{}` / tests pass after restoring the test file |
-| harness | KodCode solved in the local-ai coding agent (its own tools, plan → verify → review) | tests pass after restoring the test file |
+| harness (v0.1.0) | KodCode solved in the local-ai coding agent (its own tools, plan → verify → review) | tests pass after restoring the test file |
 
 **Selection rules**
 - Only correct and *complete* solutions (no truncation) are used, shortest first; this also shortens the reasoning.
@@ -141,7 +148,7 @@ Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 3. Accept the terms of the gated datasets on Hugging Face: [GPQA](https://huggingface.co/datasets/Idavidrein/gpqa) and
    [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k).
 4. Run the notebooks in order. Every long step writes to Drive and resumes when the session drops.
-5. In 04 and 05, use *Runtime → Restart session* between the Unsloth and vLLM/llama.cpp parts, **not**
+5. In 05 and 06, use *Runtime → Restart session* between the Unsloth and vLLM/llama.cpp parts, **not**
    "Disconnect and delete runtime", which deletes the merged model on local disk.
 
 ## Notes

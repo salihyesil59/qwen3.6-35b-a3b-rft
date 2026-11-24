@@ -19,7 +19,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("results", help="<label>_<timestamp>.jsonl written by run_eval.py or the 02 notebook")
+    ap.add_argument("results", help="<label>_<timestamp>.jsonl written by run_eval.py or the 01 notebook")
     args = ap.parse_args()
 
     path = Path(args.results)

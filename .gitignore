@@ -24,3 +24,7 @@ env/
 eval/results/
 eval/tasks/*
 !eval/tasks/personal.jsonl
+
+# Training data and LoRA checkpoints copied from Drive
+rft/
+sft/
