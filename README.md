@@ -147,7 +147,10 @@ Results go to `eval/results/` (per-sample JSONL + `summary.csv`).
 2. Add an `HF_TOKEN` (write access) in Colab's **Secrets** panel and enable notebook access.
 3. Accept the terms of the gated datasets on Hugging Face: [GPQA](https://huggingface.co/datasets/Idavidrein/gpqa) and
    [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k).
-4. Run the notebooks in order. Every long step writes to Drive and resumes when the session drops.
+4. Run the notebooks in order. Every long step writes to Drive and resumes when the session drops: generation in
+   `01` and `02`, training checkpoints and each finished eval set in `05`, and the imatrix in `06`.
+   On a phone, run the *Keep the browser tab alive* cell at the top of each notebook first: it plays a quiet tone in
+   a loop so the browser does not freeze the tab when the screen turns off.
 5. In 05 and 06, use *Runtime → Restart session* between the Unsloth and vLLM/llama.cpp parts, **not**
    "Disconnect and delete runtime", which deletes the merged model on local disk.
 
