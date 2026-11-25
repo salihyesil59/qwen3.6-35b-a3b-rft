@@ -63,6 +63,12 @@ CLAUDE_ENV = {
     "API_TIMEOUT_MS": "3600000",      # the proxy answers when the reply is complete; the default 10 min is too short
 }
 MODEL_NAME = "qwen3.6-35b-a3b"        # the name Claude Code sends; llama-server serves one model whatever the name
+# Claude Code compacts when a request holds more than: window - min(max output tokens, 20000) - 13000 (2.1.331).
+# The texts below start its compaction request and the conversation that goes on after the summary.
+COMPACT_RESERVE, COMPACT_BUFFER = 20000, 13000
+COMPACT_MIN = 16384                   # below this Claude Code would summarize after a few tool calls (~6k prompt)
+COMPACT_REQUEST = "CRITICAL: Respond with TEXT ONLY"
+COMPACT_SUMMARY = "This session is being continued from a previous conversation"
 GRADE_TIMEOUT = 180
 CONFIG_FILES = {"conftest.py", "pytest.ini", "pytest.toml", ".pytest.toml", "tox.ini", "setup.cfg", "pyproject.toml", "jest.config.js",
                 "jest.config.cjs", "jest.config.mjs", "jest.config.json", ".babelrc", "babel.config.cjs",
@@ -172,6 +178,25 @@ def for_template(messages):
     return out
 
 
+def context_env(context_tokens, turn_tokens, compact=True):
+    """Claude Code settings for a server whose conversations hold `context_tokens` and whose replies are capped at
+    `turn_tokens`. With compact=False Claude Code never summarizes: a run that outgrows the context fails instead."""
+    env = {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(int(context_tokens)), "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(int(turn_tokens))}
+    if not compact:
+        env["DISABLE_AUTO_COMPACT"] = "1"
+        return env
+    threshold = int(context_tokens) - min(int(turn_tokens), COMPACT_RESERVE) - COMPACT_BUFFER
+    if threshold < COMPACT_MIN:
+        raise ValueError(f"Claude Code would compact every conversation above {threshold} tokens (context "
+                         f"{context_tokens} - reply {min(int(turn_tokens), COMPACT_RESERVE)} - {COMPACT_BUFFER}): "
+                         f"give the server more context per conversation, fewer reply tokens, or compact=False")
+    return env
+
+
+def _has_user_text(messages, text):
+    return any(m["role"] == "user" and text in (m.get("content") or "") for m in messages)
+
+
 def is_clean(messages):
     """No user message after the first reply. The chat template drops the thinking of every reply before the last
     user message, so a reply before such a message would be trained without its thinking."""
@@ -254,7 +279,7 @@ class Proxy:
     def complete(self, run_id, body):
         with self.lock:
             req = to_openai(body, self.reasoning)
-            run = self.runs.setdefault(run_id, {"requests": 0, "tokens": 0, "last": None, "errors": []})
+            run = self.runs.setdefault(run_id, {"requests": 0, "tokens": 0, "last": None, "errors": [], "compactions": 0})
             run["requests"] += 1
         payload = {"model": self.model, "messages": req["messages"],
                    "max_tokens": min(int(body.get("max_tokens") or self.turn_tokens), self.turn_tokens),
@@ -283,8 +308,13 @@ class Proxy:
         finish = choice.get("finish_reason")
         with self.lock:
             run["tokens"] += usage.get("completion_tokens", 0)
-            if req["tools"]:   # the agent loop (side requests without tools are not the conversation)
-                run["last"] = {"messages": req["messages"] + [msg], "tools": req["tools"], "finish": finish}
+            # the agent loop (side requests without tools are not the conversation, nor is a compaction request,
+            # which comes with the tools); after a compaction the conversation starts again from the summary
+            if _has_user_text(req["messages"][-1:], COMPACT_REQUEST):
+                run["compactions"] += 1
+            elif req["tools"]:
+                run["last"] = {"messages": req["messages"] + [msg], "tools": req["tools"], "finish": finish,
+                               "compacted": _has_user_text(req["messages"], COMPACT_SUMMARY)}
             if msg.get("reasoning_content"):
                 key = msg["tool_calls"][0]["id"] if msg.get("tool_calls") else _key(msg["content"])
                 self.reasoning[key] = msg["reasoning_content"]
@@ -302,7 +332,7 @@ class Proxy:
 
     def pop(self, run_id):
         with self.lock:
-            return self.runs.pop(run_id, {"requests": 0, "tokens": 0, "last": None, "errors": []})
+            return self.runs.pop(run_id, {"requests": 0, "tokens": 0, "last": None, "errors": [], "compactions": 0})
 
     def close(self):
         self.server.shutdown()
@@ -713,7 +743,7 @@ def grade(task, project, env, user=None):
 
 
 def run_one(task, sample, proxy, work_root, claude_bin, max_turns, minutes, user=None, keep_conversation=False,
-            mcp_config=None, context_tokens=None):
+            mcp_config=None, context_tokens=None, compact=True):
     run_id = f"{task['id']}-{sample}"
     root = Path(work_root) / run_id
     shutil.rmtree(root, ignore_errors=True)
@@ -730,8 +760,8 @@ def run_one(task, sample, proxy, work_root, claude_bin, max_turns, minutes, user
     env = {"PATH": f"{Path(claude_bin).parent}:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(home),
            "LANG": "C.UTF-8", "ANTHROPIC_BASE_URL": proxy.base_url(run_id), "ANTHROPIC_API_KEY": "local",
            "ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL_NAME, "IS_SANDBOX": "1", **CLAUDE_ENV}
-    if context_tokens:   # compact before the conversation outgrows the server's context
-        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)
+    if context_tokens:   # compact (or stop) before the conversation outgrows the server's context
+        env.update(context_env(context_tokens, proxy.turn_tokens, compact))
     if task.get("pythonpath"):
         env["PYTHONPATH"] = str(project / task["pythonpath"])
     cmd = [claude_bin, "-p", task["prompt"], "--model", MODEL_NAME, *CLAUDE_FLAGS,
@@ -751,6 +781,8 @@ def run_one(task, sample, proxy, work_root, claude_bin, max_turns, minutes, user
             continue
     if code is None:
         end = "timeout"
+    elif isinstance(result, dict) and result.get("is_error") and result.get("subtype") == "success":
+        end = f"error: {str(result.get('result'))[:150]}"   # e.g. "Prompt is too long": not a finished run
     elif isinstance(result, dict) and result.get("subtype"):
         end = result["subtype"]                       # success / error_max_turns / error_during_execution
     else:
@@ -764,10 +796,11 @@ def run_one(task, sample, proxy, work_root, claude_bin, max_turns, minutes, user
     record = {"id": task["id"], "source": task["source"], "sample": sample, "ok": ok, "end": end, "detail": detail,
               "turns": sum(m["role"] == "assistant" for m in messages), "requests": log["requests"],
               "tool_calls": sum(len(m.get("tool_calls") or []) for m in messages), "tokens": log["tokens"],
-              "seconds": round(seconds, 1)}
+              "compactions": log["compactions"], "seconds": round(seconds, 1)}
     conversation = None
     if keep_conversation and log["last"]:
         conversation = {"id": task["id"], "sample": sample, "ok": ok, "end": end,
+                        "compacted": log["compactions"] > 0 or log["last"]["compacted"],
                         "messages": messages, "tools": log["last"]["tools"]}
     shutil.rmtree(root, ignore_errors=True)
     return record, conversation
@@ -775,9 +808,12 @@ def run_one(task, sample, proxy, work_root, claude_bin, max_turns, minutes, user
 
 def run_tasks(tasks, samples, proxy, results_path, claude_bin, work_root="/content/cc_work", concurrency=16,
               max_turns=40, minutes=20, hours=None, user=None, conversations_path=None, label="", mcp_config=None,
-              context_tokens=None):
+              context_tokens=None, compact=True):
     """Runs every (task, sample) not yet in results_path, `concurrency` at a time; appends results as they finish.
-    Resumable: after a disconnect call it again. Stops starting new runs after `hours`."""
+    Resumable: after a disconnect call it again. Stops starting new runs after `hours`.
+    compact=False: Claude Code does not summarize long conversations (training data: only whole conversations)."""
+    if context_tokens:
+        context_env(context_tokens, proxy.turn_tokens, compact)   # fails early if the settings would compact every run
     done = set()
     if os.path.exists(results_path):
         for l in open(results_path, encoding="utf-8"):
@@ -796,7 +832,7 @@ def run_tasks(tasks, samples, proxy, results_path, claude_bin, work_root="/conte
                 if item is None:
                     break
                 pending.add(ex.submit(run_one, item[0], item[1], proxy, work_root, claude_bin, max_turns, minutes,
-                                      user, conversations_path is not None, mcp_config, context_tokens))
+                                      user, conversations_path is not None, mcp_config, context_tokens, compact))
             if not pending:
                 break
             ready, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -877,7 +913,11 @@ def main():
            "ANTHROPIC_API_KEY": "", "ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL_NAME, "CLAUDE_CONFIG_DIR": args.config_dir,
            **CLAUDE_ENV}
     if context:
-        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(int(context))
+        try:
+            env.update(context_env(context, args.max_tokens))
+        except ValueError as e:
+            proxy.close()
+            sys.exit(f"{e}. Load the model with a longer context, or pass a smaller --max-tokens.")
     Path(args.config_dir).mkdir(parents=True, exist_ok=True)
     mcp = web_mcp_config(Path(args.config_dir) / "web-mcp.json", Path(__file__).resolve().with_name("web_mcp.py"))
     cmd = [shutil.which("claude") or "claude", "--model", MODEL_NAME, *CLAUDE_FLAGS, "--mcp-config", mcp, *claude_args]
